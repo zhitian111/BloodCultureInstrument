@@ -14,7 +14,7 @@ BloodCultureInstrument/
 ├── README.md
 ├── LICENSE
 ├── .gitignore
-├── data/
+├── dataset/
 ├── model/
 ├── src/
 │   ├── python/
