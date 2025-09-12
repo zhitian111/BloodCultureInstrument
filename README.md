@@ -13,6 +13,7 @@ BloodCultureInstrument/
 ├── Makefile                   
 ├── README.md
 ├── LICENSE
+├── .gitattributes
 ├── .gitignore
 ├── dataset/
 ├── model/
