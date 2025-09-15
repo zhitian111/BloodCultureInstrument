@@ -1,4 +1,5 @@
-build/**
-bin/**
-.temp/**
-docs/old/**
+build/
+bin/
+.temp/
+docs/old/
+./idea
