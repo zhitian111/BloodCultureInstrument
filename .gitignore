@@ -3,3 +3,5 @@ bin/
 .temp/
 docs/old/
 .idea/
+__pycache__
+.venv
