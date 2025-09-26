@@ -5,3 +5,6 @@ docs/old/
 .idea/
 __pycache__
 .venv
+.gitignore
+./dataset/original_data/
+./dataset/processed_data/

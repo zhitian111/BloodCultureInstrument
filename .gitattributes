@@ -1,2 +1,0 @@
-dataset/datas.csv filter=lfs diff=lfs merge=lfs -text
-dataset/labels.csv filter=lfs diff=lfs merge=lfs -text
