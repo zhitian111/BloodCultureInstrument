@@ -4,7 +4,7 @@ import pyarrow.feather as feather  # 导入Feather格式处理模块，用于读
 
 
 def main():
-    # 读取数据CSV文件（p_datas.csv）并转换为Arrow Table
+    # 读取数据CSV文件（datas.csv）并转换为Arrow Table
     # Arrow Table是PyArrow中用于存储结构化数据的核心对象，采用列式存储
     data_table = csv.read_csv("original_data/datas.csv")
 
@@ -16,7 +16,7 @@ def main():
     # Feather格式是基于Arrow的高效存储格式，读写速度快且保留完整数据类型
     feather.write_feather(data_table, "data.arrow")
 
-    # 读取标签CSV文件（p_labels.csv）并转换为Arrow Table
+    # 读取标签CSV文件（labels.csv）并转换为Arrow Table
     label_table = csv.read_csv("original_data/labels.csv")
 
     # 从标签表格中删除指定列（"SPE_CODE"）
