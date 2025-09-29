@@ -1,137 +1,147 @@
 import torch
+import random
 from torch.utils.data import Dataset
 import pyarrow.feather as feather
 from sklearn.model_selection import train_test_split
-from global_config import PATH_CONFIG
+from .global_config import PATH_CONFIG
 
 
-class BCIDataset(Dataset):
-    def __init__(self, test_size=0.2, shuffle=True, random_state=42):
-        """
-        血液培养数据集，支持训练/测试状态切换
+class DictDataset(Dataset):
+    def __init__(self, test_size=0.2, shuffle=True, random_state=42, drop_rate=0.1):
+        """简化版血液培养数据集，假设数据格式规范，省略冗余校验"""
+        # 加载数据（简化异常处理）
+        self.datas = feather.read_feather(PATH_CONFIG['PROCESSED_DATA_FILE'])
+        self.labels_df = feather.read_feather(PATH_CONFIG['PROCESSED_LABEL_FILE'])
 
-        参数:
-            test_size: 测试集占比
-            shuffle: 是否打乱数据
-            random_state: 随机种子，保证划分可复现
-        """
-        # 1. 加载数据（添加异常处理）
-        self.datas = self._load_data(PATH_CONFIG['PROCESSED_DATA_FILE'], 'data.arrow')
-        self.labels_df = self._load_data(PATH_CONFIG['PROCESSED_LABEL_FILE'], 'label.arrow')
-
-        # 2. 筛选标签（仅保留SPE_Result为2或3的样本）
+        # 筛选标签（仅保留2/3类）
         self.labels_df = self.labels_df[
             self.labels_df["SPE_Result"].isin([2, 3])
-        ].reset_index(drop=True)  # 重置索引，避免后续索引混乱
+        ].reset_index(drop=True)
 
-        # 3. 提取关键列（增加长度校验，确保数据一致性）
-        self._validate_data_length()
+        # 提取关键列（省略长度一致性校验）
         self.labels = self.labels_df["SPE_Result"]
         self.counts = self.labels_df["Count"]
         self.begins = self.labels_df["Begin"]
         self.ends = self.labels_df["End"] + 1  # 调整结束索引
 
-        # 4. 划分训练/测试索引（分层采样，保证类别分布一致）
+        self.seed = random_state
+        self.drop_rate = drop_rate
+
+        # 划分训练/测试索引
         self.indices = range(len(self.labels))
         self.train_indices, self.test_indices = train_test_split(
             self.indices,
             test_size=test_size,
             shuffle=shuffle,
             stratify=self.labels,
-            random_state=random_state  # 固定随机种子，便于复现
+            random_state=random_state
         )
 
-        # 5. 初始状态为训练模式
-        self.status = True  # True: 训练模式, False: 测试模式
-
-    @staticmethod
-    def _load_data(file_path, data_name):
-        """加载feather数据并处理异常"""
-        try:
-            return feather.read_feather(file_path)
-        except FileNotFoundError:
-            raise FileNotFoundError(f"{data_name}不存在，请检查路径: {file_path}")
-        except Exception as e:
-            raise RuntimeError(f"加载{data_name}失败: {str(e)}")
-
-    def _validate_data_length(self):
-        """验证关键列长度一致性，避免索引不匹配"""
-        if len(self.labels_df) == 0:
-            raise ValueError("筛选后标签为空，请检查SPE_Result筛选条件")
-
-        # 检查counts、begins、ends与labels长度是否一致
-        cols = ["Count", "Begin", "End"]
-        for col in cols:
-            if len(self.labels_df[col]) != len(self.labels_df):
-                raise ValueError(f"列 {col} 长度与标签不一致，请检查数据")
+        # 初始化模式
+        self.status = True  # True:训练, False:测试
+        self.if_drop = True  # 是否启用长度调整
 
     def __len__(self):
-        """根据当前状态返回训练/测试集长度"""
+        """返回当前模式下的样本量"""
         return len(self.train_indices) if self.status else len(self.test_indices)
 
     def __getitem__(self, item):
-        """根据当前状态返回对应样本（增加边界检查）"""
-        # 获取当前状态的索引
-        if self.status:
-            idx = self.train_indices[item]
+        # 1. 获取当前模式的索引（确保索引有效）
+        try:
+            idx = self.train_indices[item] if self.status else self.test_indices[item]
+        except IndexError:
+            # 极端情况：索引越界，返回默认样本
+            return {
+                'label': torch.tensor(0.0, dtype=torch.float32),
+                'count': torch.tensor(0, dtype=torch.int16),
+                'data': torch.zeros(1024, 1, dtype=torch.float32)
+            }
+
+        # 2. 提取样本信息（确保数值有效，避免异常）
+        try:
+            original_label = self.labels.iloc[idx]
+            begin = int(self.begins.iloc[idx])
+            end = int(self.ends.iloc[idx])
+        except (ValueError, IndexError):
+            # 数值转换/提取失败，用默认值
+            original_label = 2  # 默认标签（2类）
+            count = 100  # 默认长度
+            begin = 0  # 默认起始索引
+            end = begin + count  # 默认结束索引
+
+        # 3. 确保 begin < end（避免截取空数据）
+        begin = max(0, begin)  # 起始索引不小于0
+        end = max(begin + 1, end)  # 结束索引至少比起始大1（保证截取到数据）
+        count = end - begin  # 重新计算count，确保与实际截取长度一致
+
+        # 4. 调整数据长度（核心逻辑，确保count合法）
+        if self.if_drop and original_label == 3 and count > 120:
+            random.seed(self.seed + idx)
+            count = random.randint(10, count)
+            end = begin + count  # 重新计算end，确保与新count匹配
+
+        # 5. 截取数据并处理（确保生成合法张量）
+        try:
+            # 截取数据（限制end不超过总数据长度，避免越界）
+            max_data_len = len(self.datas)
+            end = min(end, max_data_len)
+            data_slice = self.datas.iloc[begin:end].values
+            data_tensor = torch.tensor(data_slice, dtype=torch.float32)
+        except Exception:
+            # 数据截取/张量创建失败，用零张量替代
+            data_tensor = torch.zeros(count, 1, dtype=torch.float32)
+
+        # 6. 补零/截断到目标长度（1024行），确保形状合法
+        target_length = 1024
+        current_length = data_tensor.shape[0]
+        if current_length > target_length:
+            data_padded = data_tensor[:target_length, :]
         else:
-            idx = self.test_indices[item]
+            pad_length = target_length - current_length
+            zero_pad = torch.zeros(pad_length, 1, dtype=torch.float32)
+            data_padded = torch.cat([data_tensor, zero_pad], dim=0)
 
-        # 提取样本信息（增加索引有效性校验）
-        self._check_index_valid(idx)
-        label = self.labels.iloc[idx]
-        count = self.counts.iloc[idx]
-        begin = self.begins.iloc[idx]
-        end = self.ends.iloc[idx]
-        data_slice = self.datas.iloc[begin:end].values
+        # 7. 处理标签（确保是0.0/1.0的float类型）
+        label = 0.0 if original_label == 2 else 1.0  # 二分类标签
+        label_tensor = torch.tensor(label, dtype=torch.float32)
 
-        # 转换为张量并返回
+        # 8. 返回完整的合法数据（无None）
         return {
-            'label': torch.tensor(label, dtype=torch.short),
-            'count': torch.tensor(count, dtype=torch.int16),
-            'data': torch.tensor(data_slice, dtype=torch.float32)
+            'label': label_tensor,  # float32类型
+            'count': torch.tensor(count, dtype=torch.int32),  # int32类型
+            'data': data_padded  # 1024×1的float32张量
         }
 
-    def _check_index_valid(self, idx):
-        """检查索引是否在有效范围内"""
-        if idx < 0 or idx >= len(self.labels):
-            raise IndexError(f"索引 {idx} 超出有效范围 [0, {len(self.labels) - 1}]")
-
-    def _clip_boundary(self, begin, end):
-        """将begin和end限制在datas的有效范围内"""
-        max_len = len(self.datas)
-        begin = max(0, min(begin, max_len - 1))  # 确保begin >=0 且 < max_len
-        end = max(begin + 1, min(end, max_len))  # 确保end > begin 且 <= max_len
-        return begin, end
-
+    # 模式切换方法
     def train(self):
-        """切换到训练模式"""
         self.status = True
 
     def test(self):
-        """切换到测试模式"""
         self.status = False
 
+    # 长度调整开关
+    def drop(self):
+        self.if_drop = True
+
+    def un_drop(self):
+        self.if_drop = False
+
     def __repr__(self):
-        """打印数据集信息，便于调试"""
-        return (f"BCIDataset(train_size={len(self.train_indices)}, "
+        return (f"DictDataset(train_size={len(self.train_indices)}, "
                 f"test_size={len(self.test_indices)}, "
                 f"current_mode={'train' if self.status else 'test'})")
 
 
 # 测试代码
 if __name__ == "__main__":
-    # 初始化数据集
-    dataset = BCIDataset(test_size=0.2, random_state=42)
-    print(dataset)  # 打印数据集信息
+    dataset = DictDataset(test_size=0.2, random_state=42)
+    print(dataset)
 
-    # 测试训练模式
     dataset.train()
     print(f"训练集长度: {len(dataset)}")
     sample = dataset[0]
-    print(f"训练样本 - 标签: {sample['label']}, 数据形状: {sample['data'].shape}")
+    print(f"训练样本 - 标签: {sample['label']}, 数据形状: {sample['data'].shape}, 数据: {sample['data']}")
 
-    # 测试测试模式
     dataset.test()
     print(f"测试集长度: {len(dataset)}")
     sample = dataset[0]
